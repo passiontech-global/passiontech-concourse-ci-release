@@ -1,0 +1,115 @@
+name: Release ci-tool
+
+# Builds the static ci-tool binary from the private source repo
+# passiontech-global/passiontech-concourse-ci and publishes it as a public
+# GitHub Release on this repository.
+#
+# Manual trigger:   gh workflow run release.yml -f ref=main -f version=v0.1.0
+# Dispatch trigger: POST /dispatches with event_type=build-release and
+#                   client_payload={ref,version,prerelease}
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Source ref (branch/tag/SHA) of passiontech-concourse-ci"
+        default: "main"
+      version:
+        description: "Release tag (e.g. v0.1.0). Empty = dev build named dev-<sha>"
+        required: false
+        default: ""
+      prerelease:
+        description: "Mark the GitHub release as a prerelease"
+        type: boolean
+        default: false
+  repository_dispatch:
+    types: [build-release]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-ci-tool
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPO: passiontech-global/passiontech-concourse-ci
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve release parameters
+        id: vars
+        env:
+          PAYLOAD: ${{ toJson(github.event.client_payload) }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "repository_dispatch" ]; then
+            ref=$(jq -r '.ref // "main"' <<<"$PAYLOAD")
+            version=$(jq -r '.version // ""' <<<"$PAYLOAD")
+            prerelease=$(jq -r '.prerelease // false' <<<"$PAYLOAD")
+          else
+            ref="${{ inputs.ref }}"
+            version="${{ inputs.version }}"
+            prerelease="${{ inputs.prerelease }}"
+          fi
+          [ -n "$ref" ] || ref="main"
+          echo "src_ref=$ref" >>"$GITHUB_OUTPUT"
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >>"$GITHUB_OUTPUT"
+
+      - name: Checkout source repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ steps.vars.outputs.src_ref }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          persist-credentials: false
+
+      - name: Finalize release parameters
+        run: |
+          set -euo pipefail
+          src_sha=$(git rev-parse HEAD)
+          version="${{ steps.vars.outputs.version }}"
+          if [ -z "$version" ]; then
+            version="dev-${src_sha::8}"
+            prerelease=true
+          else
+            prerelease="${{ steps.vars.outputs.prerelease }}"
+          fi
+          echo "REL_VERSION=$version" >>"$GITHUB_ENV"
+          echo "REL_PRERELEASE=$prerelease" >>"$GITHUB_ENV"
+          echo "SRC_SHA=$src_sha" >>"$GITHUB_ENV"
+
+      - name: Install zig (version pinned by source repo mise.toml)
+        uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          install_args: zig
+
+      - name: Build ci-tool
+        run: mise exec zig -- zig build release
+
+      - name: Smoke test binary
+        run: |
+          file bin/ci-tool
+          ./bin/ci-tool version
+          ./bin/ci-tool help >/dev/null
+
+      - name: Package assets
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp bin/ci-tool "dist/ci-tool-linux-x86_64"
+          tar -czf "dist/ci-tool-linux-x86_64.tar.gz" -C bin ci-tool
+          (cd dist && sha256sum ci-tool-linux-x86_64 ci-tool-linux-x86_64.tar.gz > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          args=(--repo "$GITHUB_REPOSITORY" --title "ci-tool $REL_VERSION" --notes "Built from $SOURCE_REPO@$SRC_SHA"$'\n\n'"Assets: ci-tool-linux-x86_64 (static musl binary), tarball, SHA256SUMS.txt")
+          [ "$REL_PRERELEASE" != "true" ] || args+=(--prerelease)
+          gh release create "$REL_VERSION" dist/* "${args[@]}"

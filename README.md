@@ -25,11 +25,21 @@ chmod +x ci-tool-linux-x86_64
 
 ## Triggering a build
 
-### Automatic (schedule)
+### Automation (repository_dispatch)
 
-A cron job polls the source repo every 10 minutes. When `main` HEAD differs
-from the source sha recorded in the newest release body, it builds and
-publishes a new release — no manual step needed.
+POST `event_type=build-release` — the same fields via `client_payload`:
+
+```sh
+gh api repos/passiontech-global/passiontech-concourse-ci-release/dispatches \
+  -X POST -f event_type=build-release \
+  -f 'client_payload[ref]=main' \
+  -f 'client_payload[version]='     # empty = auto semver bump
+```
+
+Payload fields: `ref` (default `main`), `version` (empty → auto semver),
+`prerelease` (default `false`). The caller needs a token with `repo` scope on
+this repository — e.g. a `push` workflow in the source repo can fire it on
+every commit.
 
 ### Version (auto semver)
 
@@ -64,19 +74,6 @@ gh workflow run release.yml \
 | `version` | *(empty)* | Release tag. Empty → auto semver bump |
 | `prerelease` | `false` | Mark release as prerelease |
 
-### Automation (repository_dispatch)
-
-POST `event_type=build-release` — same fields via `client_payload`:
-
-```sh
-gh api repos/passiontech-global/passiontech-concourse-ci-release/dispatches \
-  -X POST -f event_type=build-release \
-  -f 'client_payload[ref]=main' \
-  -f 'client_payload[version]=v0.1.0'
-```
-
-The caller needs a token with `repo` scope on this repository.
-
 ## Secrets
 
 | Secret | Purpose |
@@ -85,15 +82,10 @@ The caller needs a token with `repo` scope on this repository.
 
 ## How it works
 
-`.github/workflows/release.yml` has two jobs:
-
-1. `poll` (schedule only) — compares source `main` HEAD with the source sha in
-   the newest release body; skips `release` when unchanged.
-2. `release` — checkout this repo (`meta/`) + source repo (`source/`, full
-   history) → install Zig (pinned by source `mise.toml`) and git-cliff →
-   compute version + changelog → `zig build release` → smoke test → package →
-   `gh release create`.
+`.github/workflows/release.yml`: checkout this repo (`meta/`, for
+`cliff.toml`) + source repo (`source/`, full history) → install Zig (pinned
+by source `mise.toml`) and git-cliff → compute version + changelog →
+`zig build release` → smoke test → package → `gh release create`.
 
 Action references are pinned to commit SHAs. Runs are serialized via a
-`concurrency` group. To trigger instantly instead of waiting for the poll,
-POST a `repository_dispatch` (above) from a workflow in the source repo.
+`concurrency` group.

@@ -5,8 +5,6 @@ name: Release ci-tool
 # GitHub Release on this repository.
 #
 # Triggers:
-#   schedule            every 10 min: releases when source HEAD advanced past the
-#                       last released source sha (parsed from release body)
 #   workflow_dispatch   gh workflow run release.yml -f ref=main [-f version=v0.1.0]
 #   repository_dispatch event_type=build-release, client_payload={ref,version,prerelease}
 #
@@ -16,8 +14,6 @@ name: Release ci-tool
 # commit range with meta/cliff.toml.
 
 on:
-  schedule:
-    - cron: "*/10 * * * *"
   workflow_dispatch:
     inputs:
       ref:
@@ -46,34 +42,7 @@ env:
   CLIFF_VERSION: "2.14.2"
 
 jobs:
-  poll:
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    outputs:
-      skip: ${{ steps.check.outputs.skip }}
-    steps:
-      - name: Check for new source commits
-        id: check
-        env:
-          SRC_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          head_sha=$(GH_TOKEN="$SRC_TOKEN" gh api "repos/$SOURCE_REPO/commits/main" --jq .sha)
-          last_tag=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 \
-            --json tagName --jq '.[0].tagName // ""')
-          last_sha=""
-          if [ -n "$last_tag" ]; then
-            last_sha=$(gh release view "$last_tag" --repo "$GITHUB_REPOSITORY" \
-              --json body --jq .body | grep -oE '@[0-9a-f]{40}' | tr -d '@' || true)
-          fi
-          echo "source HEAD=$head_sha last_built=${last_sha:-<none>} last_tag=${last_tag:-<none>}"
-          echo "skip=$( [ "$head_sha" = "$last_sha" ] && echo true || echo false )" \
-            >>"$GITHUB_OUTPUT"
-
   release:
-    needs: poll
-    if: always() && needs.poll.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Resolve event parameters

@@ -109,12 +109,18 @@ jobs:
             last_sha=$(gh release view "$last_tag" --repo "$GITHUB_REPOSITORY" \
               --json body --jq .body | grep -oE '@[0-9a-f]{40}' | tr -d '@' || true)
           fi
+          root_sha=$(git -C ../source rev-list --max-parents=0 HEAD)
           if [ -n "$last_tag" ] && [ -n "$last_sha" ] \
             && git -C ../source merge-base --is-ancestor "$last_sha" HEAD 2>/dev/null; then
             git -C ../source tag "$last_tag" "$last_sha" 2>/dev/null || true
+          elif [ -n "$last_tag" ]; then
+            # Last released source sha is unreachable after a history rewrite —
+            # keep the version baseline and anchor the tag at the root so the
+            # changelog covers everything since.
+            git -C ../source tag "$last_tag" "$root_sha"
           else
             last_tag="v0.0.0"
-            git -C ../source tag v0.0.0 "$(git -C ../source rev-list --max-parents=0 HEAD)"
+            git -C ../source tag v0.0.0 "$root_sha"
           fi
 
           if [ -n "$version_in" ]; then

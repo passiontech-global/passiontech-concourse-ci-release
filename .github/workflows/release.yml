@@ -4,18 +4,27 @@ name: Release ci-tool
 # passiontech-global/passiontech-concourse-ci and publishes it as a public
 # GitHub Release on this repository.
 #
-# Manual trigger:   gh workflow run release.yml -f ref=main -f version=v0.1.0
-# Dispatch trigger: POST /dispatches with event_type=build-release and
-#                   client_payload={ref,version,prerelease}
+# Triggers:
+#   schedule            every 10 min: releases when source HEAD advanced past the
+#                       last released source sha (parsed from release body)
+#   workflow_dispatch   gh workflow run release.yml -f ref=main [-f version=v0.1.0]
+#   repository_dispatch event_type=build-release, client_payload={ref,version,prerelease}
+#
+# Versioning: empty version -> auto semver bump via git-cliff over conventional
+# commits since the last stable release (feat->minor, fix->patch,
+# BREAKING->major, anything else->patch). Changelog is generated from the same
+# commit range with meta/cliff.toml.
 
 on:
+  schedule:
+    - cron: "*/10 * * * *"
   workflow_dispatch:
     inputs:
       ref:
         description: "Source ref (branch/tag/SHA) of passiontech-concourse-ci"
         default: "main"
       version:
-        description: "Release tag (e.g. v0.1.0). Empty = dev build named dev-<sha>"
+        description: "Release tag (e.g. v0.1.0). Empty = auto semver bump"
         required: false
         default: ""
       prerelease:
@@ -34,12 +43,40 @@ concurrency:
 
 env:
   SOURCE_REPO: passiontech-global/passiontech-concourse-ci
+  CLIFF_VERSION: "2.14.2"
 
 jobs:
+  poll:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - name: Check for new source commits
+        id: check
+        env:
+          SRC_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          head_sha=$(GH_TOKEN="$SRC_TOKEN" gh api "repos/$SOURCE_REPO/commits/main" --jq .sha)
+          last_tag=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 \
+            --json tagName --jq '.[0].tagName // ""')
+          last_sha=""
+          if [ -n "$last_tag" ]; then
+            last_sha=$(gh release view "$last_tag" --repo "$GITHUB_REPOSITORY" \
+              --json body --jq .body | grep -oE '@[0-9a-f]{40}' | tr -d '@' || true)
+          fi
+          echo "source HEAD=$head_sha last_built=${last_sha:-<none>} last_tag=${last_tag:-<none>}"
+          echo "skip=$( [ "$head_sha" = "$last_sha" ] && echo true || echo false )" \
+            >>"$GITHUB_OUTPUT"
+
   release:
+    needs: poll
+    if: needs.poll.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve release parameters
+      - name: Resolve event parameters
         id: vars
         env:
           PAYLOAD: ${{ toJson(github.event.client_payload) }}
@@ -49,15 +86,22 @@ jobs:
             ref=$(jq -r '.ref // "main"' <<<"$PAYLOAD")
             version=$(jq -r '.version // ""' <<<"$PAYLOAD")
             prerelease=$(jq -r '.prerelease // false' <<<"$PAYLOAD")
-          else
+          elif [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             ref="${{ inputs.ref }}"
             version="${{ inputs.version }}"
             prerelease="${{ inputs.prerelease }}"
+          else
+            ref="main"; version=""; prerelease="false"
           fi
           [ -n "$ref" ] || ref="main"
           echo "src_ref=$ref" >>"$GITHUB_OUTPUT"
           echo "version=$version" >>"$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >>"$GITHUB_OUTPUT"
+
+      - name: Checkout release repo (cliff.toml)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: meta
 
       - name: Checkout source repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -66,50 +110,96 @@ jobs:
           ref: ${{ steps.vars.outputs.src_ref }}
           token: ${{ secrets.SOURCE_REPO_TOKEN }}
           persist-credentials: false
-
-      - name: Finalize release parameters
-        run: |
-          set -euo pipefail
-          src_sha=$(git rev-parse HEAD)
-          version="${{ steps.vars.outputs.version }}"
-          if [ -z "$version" ]; then
-            version="dev-${src_sha::8}"
-            prerelease=true
-          else
-            prerelease="${{ steps.vars.outputs.prerelease }}"
-          fi
-          echo "REL_VERSION=$version" >>"$GITHUB_ENV"
-          echo "REL_PRERELEASE=$prerelease" >>"$GITHUB_ENV"
-          echo "SRC_SHA=$src_sha" >>"$GITHUB_ENV"
+          path: source
+          fetch-depth: 0
 
       - name: Install zig (version pinned by source repo mise.toml)
         uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         with:
           install_args: zig
+          working_directory: source
+
+      - name: Install git-cliff
+        run: |
+          curl -sSfL "https://github.com/orhun/git-cliff/releases/download/v$CLIFF_VERSION/git-cliff-$CLIFF_VERSION-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/git-cliff-$CLIFF_VERSION" >>"$GITHUB_PATH"
+
+      - name: Compute version and changelog
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: source
+        run: |
+          set -euo pipefail
+          src_sha=$(git rev-parse HEAD)
+          version_in="${{ steps.vars.outputs.version }}"
+
+          last_tag=$(gh release view latest --repo "$GITHUB_REPOSITORY" \
+            --json tagName --jq .tagName 2>/dev/null || true)
+          last_sha=""
+          if [ -n "$last_tag" ]; then
+            last_sha=$(gh release view "$last_tag" --repo "$GITHUB_REPOSITORY" \
+              --json body --jq .body | grep -oE '@[0-9a-f]{40}' | tr -d '@' || true)
+          fi
+          if [ -n "$last_tag" ] && [ -n "$last_sha" ] \
+            && git merge-base --is-ancestor "$last_sha" HEAD 2>/dev/null; then
+            git tag "$last_tag" "$last_sha" 2>/dev/null || true
+          else
+            last_tag="v0.0.0"
+            git tag v0.0.0 "$(git rev-list --max-parents=0 HEAD)"
+          fi
+
+          if [ -n "$version_in" ]; then
+            rel_version="$version_in"
+          else
+            rel_version=$(git-cliff --bumped-version --config ../meta/cliff.toml)
+            if [ "$rel_version" = "$last_tag" ]; then
+              IFS=. read -r major minor patch <<<"${last_tag#v}"
+              rel_version="v$major.$minor.$((patch + 1))"
+            fi
+          fi
+
+          git-cliff --unreleased --tag "$rel_version" --config ../meta/cliff.toml > ../changelog.md
+          grep -q '[^[:space:]]' ../changelog.md || echo "No user-facing changes." > ../changelog.md
+          {
+            echo "Built from $SOURCE_REPO@$src_sha"
+            echo ""
+            echo "Range: \`$last_tag\` -> \`$rel_version\`"
+            echo ""
+            cat ../changelog.md
+          } > ../notes.md
+          cat ../notes.md
+
+          echo "REL_VERSION=$rel_version" >>"$GITHUB_ENV"
+          echo "REL_PRERELEASE=${{ steps.vars.outputs.prerelease }}" >>"$GITHUB_ENV"
+          echo "SRC_SHA=$src_sha" >>"$GITHUB_ENV"
 
       - name: Build ci-tool
+        working-directory: source
         run: mise exec zig -- zig build release
 
       - name: Smoke test binary
+        working-directory: source
         run: |
           file bin/ci-tool
           ./bin/ci-tool version
           ./bin/ci-tool help >/dev/null
 
       - name: Package assets
+        working-directory: source
         run: |
           set -euo pipefail
-          mkdir -p dist
-          cp bin/ci-tool "dist/ci-tool-linux-x86_64"
-          tar -czf "dist/ci-tool-linux-x86_64.tar.gz" -C bin ci-tool
-          (cd dist && sha256sum ci-tool-linux-x86_64 ci-tool-linux-x86_64.tar.gz > SHA256SUMS.txt)
-          cat dist/SHA256SUMS.txt
+          mkdir -p ../dist
+          cp bin/ci-tool "../dist/ci-tool-linux-x86_64"
+          tar -czf "../dist/ci-tool-linux-x86_64.tar.gz" -C bin ci-tool
+          (cd ../dist && sha256sum ci-tool-linux-x86_64 ci-tool-linux-x86_64.tar.gz > SHA256SUMS.txt)
+          cat ../dist/SHA256SUMS.txt
 
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          args=(--repo "$GITHUB_REPOSITORY" --title "ci-tool $REL_VERSION" --notes "Built from $SOURCE_REPO@$SRC_SHA"$'\n\n'"Assets: ci-tool-linux-x86_64 (static musl binary), tarball, SHA256SUMS.txt")
+          args=(--repo "$GITHUB_REPOSITORY" --title "ci-tool $REL_VERSION" --notes-file notes.md)
           [ "$REL_PRERELEASE" != "true" ] || args+=(--prerelease)
           gh release create "$REL_VERSION" dist/* "${args[@]}"

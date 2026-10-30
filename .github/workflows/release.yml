@@ -134,8 +134,8 @@ jobs:
           src_sha=$(git rev-parse HEAD)
           version_in="${{ steps.vars.outputs.version }}"
 
-          last_tag=$(gh release view latest --repo "$GITHUB_REPOSITORY" \
-            --json tagName --jq .tagName 2>/dev/null || true)
+          last_tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" \
+            --jq .tag_name 2>/dev/null || true)
           last_sha=""
           if [ -n "$last_tag" ]; then
             last_sha=$(gh release view "$last_tag" --repo "$GITHUB_REPOSITORY" \

@@ -82,10 +82,11 @@ gh workflow run release.yml \
 
 ## How it works
 
-`.github/workflows/release.yml`: checkout this repo (`meta/`, for
-`cliff.toml`) + source repo (`source/`, full history) → install Zig (pinned
-by source `mise.toml`) and git-cliff → compute version + changelog →
-`zig build release` → smoke test → package → `gh release create`.
+`.github/workflows/release.yml`: checkout this repo (`meta/`) + source repo
+(`source/`, full history) → install Zig (pinned by `source/mise.toml`) and
+git-cliff (pinned by `meta/mise.toml`) → compute version + changelog via
+`cliff.toml` → `zig build release` → smoke test → package →
+`gh release create`.
 
 Action references are pinned to commit SHAs. Runs are serialized via a
 `concurrency` group.

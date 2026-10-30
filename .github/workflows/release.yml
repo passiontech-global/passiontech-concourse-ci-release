@@ -39,7 +39,6 @@ concurrency:
 
 env:
   SOURCE_REPO: passiontech-global/passiontech-concourse-ci
-  CLIFF_VERSION: "2.14.2"
 
 jobs:
   release:
@@ -88,19 +87,19 @@ jobs:
           install_args: zig
           working_directory: source
 
-      - name: Install git-cliff
-        run: |
-          curl -sSfL "https://github.com/orhun/git-cliff/releases/download/v$CLIFF_VERSION/git-cliff-$CLIFF_VERSION-x86_64-unknown-linux-musl.tar.gz" \
-            | tar -xz -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/git-cliff-$CLIFF_VERSION" >>"$GITHUB_PATH"
+      - name: Install git-cliff (version pinned by release repo mise.toml)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: meta
+        run: mise install
 
       - name: Compute version and changelog
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        working-directory: source
+        working-directory: meta
         run: |
           set -euo pipefail
-          src_sha=$(git rev-parse HEAD)
+          src_sha=$(git -C ../source rev-parse HEAD)
           version_in="${{ steps.vars.outputs.version }}"
 
           last_tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" \
@@ -111,24 +110,24 @@ jobs:
               --json body --jq .body | grep -oE '@[0-9a-f]{40}' | tr -d '@' || true)
           fi
           if [ -n "$last_tag" ] && [ -n "$last_sha" ] \
-            && git merge-base --is-ancestor "$last_sha" HEAD 2>/dev/null; then
-            git tag "$last_tag" "$last_sha" 2>/dev/null || true
+            && git -C ../source merge-base --is-ancestor "$last_sha" HEAD 2>/dev/null; then
+            git -C ../source tag "$last_tag" "$last_sha" 2>/dev/null || true
           else
             last_tag="v0.0.0"
-            git tag v0.0.0 "$(git rev-list --max-parents=0 HEAD)"
+            git -C ../source tag v0.0.0 "$(git -C ../source rev-list --max-parents=0 HEAD)"
           fi
 
           if [ -n "$version_in" ]; then
             rel_version="$version_in"
           else
-            rel_version=$(git-cliff --bumped-version --config ../meta/cliff.toml)
+            rel_version=$(mise exec -- git-cliff --bumped-version --repository ../source --config cliff.toml)
             if [ "$rel_version" = "$last_tag" ]; then
               IFS=. read -r major minor patch <<<"${last_tag#v}"
               rel_version="v$major.$minor.$((patch + 1))"
             fi
           fi
 
-          git-cliff --unreleased --tag "$rel_version" --config ../meta/cliff.toml > ../changelog.md
+          mise exec -- git-cliff --unreleased --tag "$rel_version" --repository ../source --config cliff.toml > ../changelog.md
           grep -q '[^[:space:]]' ../changelog.md || echo "No user-facing changes." > ../changelog.md
           {
             echo "Built from $SOURCE_REPO@$src_sha"

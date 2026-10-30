@@ -1,11 +1,11 @@
 [changelog]
 header = ""
-body = """
-{%- for group, commits in commits | group_by(attribute="group") %}
+body = """\
+{% for group, commits in commits | group_by(attribute="group") -%}
 ### {{ group | upper_first }}
-{% for commit in commits %}
+{% for commit in commits -%}
 - {{ commit.message | trim | split(pat="\n") | first | trim }} ({{ commit.id | truncate(length=7, end="") }})
-{%- endfor %}
+{% endfor %}\
 {% endfor -%}
 """
 trim = true

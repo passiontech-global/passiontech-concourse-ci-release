@@ -73,7 +73,7 @@ jobs:
 
   release:
     needs: poll
-    if: needs.poll.outputs.skip != 'true'
+    if: always() && needs.poll.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Resolve event parameters

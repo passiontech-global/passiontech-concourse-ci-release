@@ -150,12 +150,13 @@ jobs:
 
       - name: Build ci-tool
         working-directory: source
-        run: mise exec zig -- zig build release
+        run: mise exec zig -- zig build release -Dversion="$REL_VERSION"
 
       - name: Smoke test binary
         working-directory: source
         run: |
           file bin/ci-tool
+          ./bin/ci-tool --version
           ./bin/ci-tool version
           ./bin/ci-tool help >/dev/null
 
